@@ -132,41 +132,71 @@ src/itbench-aa/
 
 ## Run Evaluation / Harness
 
-This dataset is not published to the Harbor datasets registry, so tasks are generated and run locally. Whether the
-full set is registered later is open; see [Known limitations](#known-limitations).
-
-### Quickstart
-
 Prerequisites and manual dataset download are covered in [Installation / Prerequisites](#installation--prerequisites).
 A full local run of all 40 tasks needs substantial disk; see the [disk table](#usage-create-task-directories) first.
+
+### Running with Datasets Registry
+
+Not yet available: the dataset is not published to the Harbor datasets registry, so tasks are generated and run
+locally (see the next two subsections). Whether the full set or a curated subset is registered is open; see
+[Known limitations](#known-limitations). Once published, the run will be:
+
+```bash
+# Use oracle agent (reference solution)
+uv run harbor run -d artificialanalysis/itbench-aa
+
+# Use your specified agent and model
+uv run harbor run -d artificialanalysis/itbench-aa -a <agent_name> -m "<model_name>"
+```
+
+### Using Job Configurations
+
+The reference config is [`run_itbench-aa.yaml`](run_itbench-aa.yaml): the oracle agent is the default, and the
+Stirrup parity agent and `claude-code` are commented-out alternatives. Generate the tasks first (see
+[Usage](#usage-create-task-directories)), then:
 
 ```bash
 # From the repository root
 uv sync --project src/itbench-aa
 
-# 1. Generate Harbor tasks (downloads the dataset, stages telemetry, writes task dirs)
-#    For any run whose scores will be reported, add --hf-revision <commit_sha> (see Usage).
+# Generate Harbor tasks (downloads the dataset, stages telemetry, writes task dirs).
+# For any run whose scores will be reported, add --hf-revision <commit_sha> (see Usage).
 uv run --project src/itbench-aa itbench-aa
 
-# Or generate a single scenario while iterating (~1 GB instead of ~31 GB)
-uv run --project src/itbench-aa itbench-aa --task-ids scenario-3 --overwrite
+# Oracle smoke test via the default config (no model calls; every task must score reward = 1.0)
+uv run --project src/itbench-aa --group parity harbor run -c src/itbench-aa/run_itbench-aa.yaml
 
-# 2. Oracle smoke test (no model calls; every task must score reward = 1.0)
-uv run --project src/itbench-aa --group parity harbor run -p datasets/itbench-aa -a oracle
-
-# 3. Real agent run (add --no-force-build on repeat passes; see Prerequisites)
+# Real agent run (add --no-force-build on repeat passes; see Prerequisites)
 uv run --project src/itbench-aa --group parity harbor run -c src/itbench-aa/run_itbench-aa.yaml -a <agent_name> -m "<model_name>"
 
 # Or run a locally prepared dataset path directly, without a config file
 uv run --project src/itbench-aa --group parity harbor run -p datasets/itbench-aa -a <agent_name> -m "<model_name>"
+
+# Resume a previously started job
+uv run --project src/itbench-aa --group parity harbor job resume -p /path/to/jobs/directory
 ```
 
 Results are saved in the `jobs/` directory by default; set `jobs_dir` in the YAML config or pass `--jobs-dir`.
 
+### Running Individual Trial
+
+For quick testing or debugging a single scenario (generate just that one with `--task-ids scenario-3`, ~1 GB
+instead of ~31 GB):
+
+```bash
+# Run a single task with oracle (pre-written solution)
+uv run --project src/itbench-aa --group parity harbor trial start -p datasets/itbench-aa/scenario-3
+
+# Run a single task with a specific agent and model
+uv run --project src/itbench-aa --group parity harbor trial start -p datasets/itbench-aa/scenario-3 -a <agent_name> -m "<model_name>"
+```
+
+Trial outputs are saved in the `trials/` directory by default (configurable via `--trials-dir`).
+
 ## Usage: Create Task Directories
 
-The CLI is `itbench-aa` (Quickstart step 1 shows the `uv run --project` form; equivalently
-`cd src/itbench-aa && uv run itbench-aa`). Flags:
+The CLI is `itbench-aa` ([Using Job Configurations](#using-job-configurations) shows the `uv run --project`
+form; equivalently `cd src/itbench-aa && uv run itbench-aa`). Flags:
 
 - `--output-dir`: directory to write generated tasks (defaults to `datasets/itbench-aa` at the repo root)
 - `--dataset-path`: an explicit local directory containing `Scenario-N/` dirs (for example a manually copied or
@@ -193,18 +223,20 @@ The CLI is `itbench-aa` (Quickstart step 1 shows the `uv run --project` form; eq
 
 **Runs pending.** The parity experiment is implemented end to end -- shared Stirrup loop, Harbor-side agent,
 original-side runner, cross-grader, summarizer, all under [`parity/`](parity) -- but no model runs have been made
-yet, so no scores exist (the [oracle gate](#oracle-verification) is a deterministic replay, not a model run). When
-the protocol under [Reproduction](#reproduction-protocol) completes, results will be recorded here and in
-[`parity_experiment.json`](parity_experiment.json).
+yet, so no scores exist. The run plan (agents, model, number of runs, judge) is awaiting sign-off from the adapters
+team. When the protocol under [Reproduction](#reproduction-protocol) completes, results will be recorded here and in
+[`parity_experiment.json`](parity_experiment.json). Two kinds of evidence exist already, and neither is parity: the
+[oracle gate](#oracle-verification), a deterministic replay with no model runs, and the judge-vs-rules grader
+agreement measured on existing runs ([GRADING.md](GRADING.md#judge-vs-rules-agreement-grader-validation-not-parity)).
 
 | Agent | Model | Metric | Number of Runs | Dataset Size | Original Benchmark Performance | Harbor Adapter Performance |
 |-------|-------|--------|----------------|--------------|--------------------------------|----------------------------|
-| stirrup@0.2.0 | claude-haiku-4-5-20251001 | avg. precision at full recall | 3 (planned) | 40 | TBD-after-runs | TBD-after-runs |
-| claude-code@latest | claude-haiku-4-5-20251001 | avg. precision at full recall | 3 (planned) | 40 | N/A | TBD-after-runs |
+| stirrup@0.2.0 | claude-haiku-4-5-20251001 | avg. precision at full recall | 3 (planned) | 40 (100%) | pending | pending |
+| claude-code@2.1.289 | claude-haiku-4-5-20251001 | avg. precision at full recall | 3 (planned) | 40 (100%) | N/A | pending |
 
 Scores will be reported as mean ± sample SEM over 3 runs per side. The original benchmark only runs Stirrup, so the
-standard-agent row (a Harbor CLI agent on the same model; its exact claude-code version is pinned and recorded at
-run time) has no original-side figure; it shows the adapter works beyond Stirrup.
+standard-agent row (a Harbor CLI agent on the same model; the claude-code version is re-confirmed from the job's
+`agent_info` at run time) has no original-side figure; it shows the adapter works beyond Stirrup.
 
 **Why not compare with the leaderboard.** AA publishes one score per model over all 59 tasks, with no per-task or
 public-only breakdown, so the leaderboard gives no reference figure for the 40 public tasks this adapter covers. Its
@@ -257,9 +289,9 @@ staging step, cross-grading, the summarizer -- is in [parity/README.md](parity/R
 
 **Links:** [AA methodology](https://artificialanalysis.ai/methodology/intelligence-benchmarking#itbench-aa) ·
 [dataset](https://huggingface.co/datasets/ArtificialAnalysis/ITBench-AA) ·
-[Stirrup harness](https://github.com/ArtificialAnalysis/Stirrup); adapter PR TBD. This adapter was
-migrated from [harbor-framework/harbor#3403](https://github.com/harbor-framework/harbor/pull/3403),
-which carries the original review history and oracle-run evidence.
+[Stirrup harness](https://github.com/ArtificialAnalysis/Stirrup) · adapter PR: harbor-framework/adapters PR TBD
+(migrated from [harbor-framework/harbor#3403](https://github.com/harbor-framework/harbor/pull/3403), which carries
+the original review history and oracle-run evidence) · dataset PR and HuggingFace parity PR: pending parity runs.
 
 ## Notes & Caveats
 
@@ -383,3 +415,10 @@ This adapter is developed and maintained by [Daniel Blei](mailto:dblei@redhat.co
 - Submit Issues and Pull Requests to the [harbor-framework/adapters](https://github.com/harbor-framework/adapters)
   repository
 - Follow the project's coding style and commit guidelines
+
+## Acknowledgement
+
+If API keys provided via [parity_api_instructions.md](../parity_api_instructions.md) are used for the parity
+experiments:
+
+> API inference compute for running parity tests is generously supported by [2077AI](https://www.2077ai.com/) (https://www.2077ai.com/).

@@ -13,9 +13,22 @@ environment:
   type: docker
   force_build: true
   delete: true
-agents:
-  - name: oracle
-  # - name: claude-code
-  #   model_name: anthropic/claude-haiku-4-5-20251001
 datasets:
   - path: datasets/itbench-aa
+
+# Default: oracle agent for verification (every task must score reward = 1.0)
+agents:
+  - name: oracle
+
+# Uncomment to run with other agents (replace the block above):
+#
+# Parity agent -- the shared Stirrup 0.2.0 loop (src/itbench_aa/agents/stirrup.py).
+# Pass --artifact /workspace/answer.json on the CLI for cross-grading; see parity/README.md.
+# agents:
+#   - import_path: itbench_aa.agents.stirrup:StirrupAgent
+#     model_name: anthropic/claude-haiku-4-5-20251001
+#
+# Standard CLI agent (standard-agent row of the parity table)
+# agents:
+#   - name: claude-code
+#     model_name: anthropic/claude-haiku-4-5-20251001

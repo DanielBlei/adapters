@@ -16,7 +16,7 @@ the README parity table, and `../parity_experiment.json`.
   SHA, not a branch -- `ground_truth.yaml` is copied verbatim from the snapshot, so an upstream edit would silently
   change results).
 - The `stirrup[litellm]==0.2.0` pin in the Harbor-side commands must match the original side exactly.
-- Oracle gate first: every task must score `reward = 1.0` (README Quickstart, step 2) before any parity run counts.
+- Oracle gate first: every task must score `reward = 1.0` (README [Using Job Configurations](../README.md#using-job-configurations), oracle smoke test) before any parity run counts.
 - Sizing: each task asks for 12 GiB RAM / 4 CPUs, so the default concurrency of 4 (`-n 4` / `--concurrency 4`) needs
   ~48 GB RAM; lower it on smaller hosts. Every task image embeds ~0.5-1.2 GB of telemetry, so keep `--reuse-images`
   (original side) and `force_build: false` (Harbor side) for repeat passes.
