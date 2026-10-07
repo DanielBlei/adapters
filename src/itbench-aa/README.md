@@ -225,9 +225,10 @@ form; equivalently `cd src/itbench-aa && uv run itbench-aa`). Flags:
 original-side runner, cross-grader, summarizer, all under [`parity/`](parity) -- but no model runs have been made
 yet, so no scores exist. The run plan (agents, model, number of runs, judge) is awaiting sign-off from the adapters
 team. When the protocol under [Reproduction](#reproduction-protocol) completes, results will be recorded here and in
-[`parity_experiment.json`](parity_experiment.json). Two kinds of evidence exist already, and neither is parity: the
-[oracle gate](#oracle-verification), a deterministic replay with no model runs, and the judge-vs-rules grader
-agreement measured on existing runs ([GRADING.md](GRADING.md#judge-vs-rules-agreement-grader-validation-not-parity)).
+[`parity_experiment.json`](parity_experiment.json). The [oracle gate](#oracle-verification) is a deterministic
+replay with no model runs, so it is reported separately and is not parity evidence; likewise the judge-vs-rules
+agreement from the cross-grade below is grader validation, reported alongside the parity table rather than as part
+of it.
 
 | Agent | Model | Metric | Number of Runs | Dataset Size | Original Benchmark Performance | Harbor Adapter Performance |
 |-------|-------|--------|----------------|--------------|--------------------------------|----------------------------|
