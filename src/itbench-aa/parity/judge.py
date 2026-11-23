@@ -582,7 +582,16 @@ def _extract_response_json(response: Any) -> dict[str, Any]:
     """Accept an SDK Completion-shaped object, a raw dict, or JSON text."""
     if isinstance(response, dict):
         return response
-    message = response.choices[0].message
+    # An OpenAI-compatible endpoint can answer 200 with an empty (or
+    # missing) choices list, e.g. under transient overload. Surface that as
+    # an OpenAIError so _call_judge's retry loop backs off and retries
+    # instead of dying on a bare IndexError after partial API spend.
+    choices = getattr(response, "choices", None)
+    if not choices:
+        raise openai.OpenAIError(
+            f"judge response carries no choices ({type(response).__name__})"
+        )
+    message = choices[0].message
     content = message.content
     if isinstance(content, dict):
         return content

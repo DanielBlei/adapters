@@ -24,7 +24,7 @@ dev = [
     "pytest",
 ]
 parity = [
-    "harbor==0.23.0",
+    "harbor==0.27.0",
     "openai",
     "stirrup[litellm]==0.2.0",
 ]

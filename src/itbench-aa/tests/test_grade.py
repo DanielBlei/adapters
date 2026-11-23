@@ -214,15 +214,20 @@ def _load_grade(tmp_path: Path, ground_truth_yaml: str = MINIMAL_GT):
     workspace = tmp_path / "workspace"
     logs_verifier = tmp_path / "logs" / "verifier"
     logs_agent = tmp_path / "logs" / "agent"
+    publish_dir = tmp_path / "logs" / "artifacts" / "agent"
     workspace.mkdir(parents=True)
     logs_agent.mkdir(parents=True)
+    publish_dir.mkdir(parents=True)
     (tmp_path / "ground_truth.yaml").write_text(ground_truth_yaml)
 
     grade.ANSWER_PATH = workspace / "answer.json"
     grade.GROUND_TRUTH_PATH = tmp_path / "ground_truth.yaml"
     grade.REWARD_DIR = logs_verifier
     grade.REWARD_PATH = logs_verifier / "reward.json"
-    grade.AGENT_LOGS_DIR = logs_agent
+    # Mirror the real TRANSCRIPT_DIRS shape: /logs/agent first (same-container
+    # verifier), the convention-dir publish location second (separate
+    # verifier).
+    grade.TRANSCRIPT_DIRS = (logs_agent, publish_dir)
     return grade
 
 
@@ -252,7 +257,7 @@ def _write_answer(grade, contributing_factors: list[dict], **extra) -> None:
 
 def _write_transcript(grade, contributing_factors: list[dict]) -> None:
     """Agent stated its answer in chat but never wrote answer.json."""
-    transcript = grade.AGENT_LOGS_DIR / "session.jsonl"
+    transcript = grade.TRANSCRIPT_DIRS[0] / "session.jsonl"
     blob = json.dumps({"contributing_factors": contributing_factors})
     entry = {
         "message": {
@@ -648,11 +653,16 @@ def test_recovery_prints_fallback_notice():
 
 
 def _write_atif_trajectory(
-    grade, contributing_factors: list[dict] | None, agent_steps: int = 2
+    grade,
+    contributing_factors: list[dict] | None,
+    agent_steps: int = 2,
+    dir_index: int = 0,
 ) -> None:
-    """Stirrup-style logs dir: only an ATIF trajectory.json (harbor uploads
-    the host trial agent dir to /logs/agent pre-verify). The answer JSON is
-    embedded in the last agent step's run_shell tool-call arguments."""
+    """Stirrup-style logs: only an ATIF trajectory.json (delivered to the
+    grader either via the agent log mount or the artifacts publish dir --
+    ``dir_index`` picks which TRANSCRIPT_DIRS slot receives it). The answer
+    JSON is embedded in the last agent step's run_shell tool-call
+    arguments."""
     steps: list[dict] = [{"step_id": 1, "source": "user", "message": "solve it"}]
     for i in range(agent_steps):
         step: dict = {
@@ -672,7 +682,7 @@ def _write_atif_trajectory(
                 }
             ]
         steps.append(step)
-    (grade.AGENT_LOGS_DIR / "trajectory.json").write_text(
+    (grade.TRANSCRIPT_DIRS[dir_index] / "trajectory.json").write_text(
         json.dumps({"agent": {"name": "stirrup"}, "steps": steps})
     )
 
@@ -707,6 +717,38 @@ def test_atif_not_double_counted_with_jsonl():
         result = _run(grade)
         # CLI transcript wins (1 assistant line); ATIF is fallback only.
         assert result["turn_count"] == 1.0, result
+
+
+def test_transcripts_read_from_artifacts_publish_dir():
+    """Separate-verifier reality: /logs/agent is NOT delivered to the
+    verifier sandbox at all (it cannot be declared as a task artifact --
+    harbor lint artifact-log-overlap); the stirrup agent publishes its
+    trajectory into the conventional /logs/artifacts/agent/ dir instead,
+    and the grader must find it there."""
+    with tempfile.TemporaryDirectory() as td:
+        grade = _load_grade(Path(td))
+        grade.TRANSCRIPT_DIRS = (grade.TRANSCRIPT_DIRS[1],)
+        _write_atif_trajectory(grade, _cf("default/Pod/root-pod-xyz"))
+        result = _run(grade)
+        assert result["answer_recovered_from_transcript"] == 1.0, result
+        assert result["name_match"] == 1.0, result
+        assert result["turn_count"] == 2.0, result
+        assert result["reward"] == 0.0, result
+
+
+def test_agent_logs_dir_wins_over_published_copy():
+    """Same-container reality: /logs/agent holds the CLI transcript AND the
+    convention dir holds a published trajectory copy. The first productive
+    dir wins -- the published copy must not double the count (nor flip the
+    source of the recovered answer)."""
+    with tempfile.TemporaryDirectory() as td:
+        grade = _load_grade(Path(td))
+        _write_transcript(grade, _cf("default/Pod/root-pod-xyz"))
+        _write_atif_trajectory(grade, None, agent_steps=3, dir_index=1)
+        result = _run(grade)
+        assert result["turn_count"] == 1.0, result
+        assert result["answer_recovered_from_transcript"] == 1.0, result
+        assert result["reward"] == 0.0, result
 
 
 # ---------------------------------------------------------------------------

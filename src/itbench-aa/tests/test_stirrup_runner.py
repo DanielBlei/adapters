@@ -25,15 +25,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from itbench_aa.agents.stirrup import QuietAgentLogger, StirrupAgent
-from itbench_aa.stirrup_runner import (
-    BackendResult,
-    HarborBackend,
-    RunShellParams,
-    build_aa_agent,
-    make_run_shell_tool,
-    run_task,
-)
+from harbor.environments.base import BaseEnvironment, ExecResult
+from harbor.models.agent.context import AgentContext
 from pydantic import ValidationError
 from stirrup import (
     AssistantMessage,
@@ -47,8 +40,15 @@ from stirrup.core.models import TurnWarningMessage
 from stirrup.tools.code_backends.base import MAX_LENGTH_SHELL_STDOUT
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL
 
-from harbor.environments.base import BaseEnvironment, ExecResult
-from harbor.models.agent.context import AgentContext
+from itbench_aa.agents.stirrup import QuietAgentLogger, StirrupAgent, _reasoning_text
+from itbench_aa.stirrup_runner import (
+    BackendResult,
+    HarborBackend,
+    RunShellParams,
+    build_aa_agent,
+    make_run_shell_tool,
+    run_task,
+)
 
 
 class RecordingBackend:
@@ -431,6 +431,55 @@ def test_stirrup_agent_run_trajectory_and_context(
     assert agent_steps[0]["observation"]["results"][0]["content"].startswith("exit=0")
     assert agent_steps[1]["tool_calls"][0]["function_name"] == "finish"
     assert traj["final_metrics"]["total_steps"] == 2
+
+    # The trajectory is also published into the conventional artifacts dir
+    # so the separate verifier can read it (see _publish_trajectory).
+    assert any("/logs/artifacts/agent" in call["command"] for call in env.calls), (
+        env.calls
+    )
+
+
+def test_reasoning_text_omits_redacted_blocks():
+    """Provider-redacted thinking (opaque ``data`` payload, no ``content``)
+    must be omitted from the ATIF reasoning_content, never written out as
+    if it were readable model reasoning."""
+    from stirrup.core.models import ReasoningBlock, RedactedReasoningBlock
+
+    message = _assistant(
+        [
+            ReasoningBlock(content="visible chain of thought"),
+            RedactedReasoningBlock(data="opaque-provider-payload"),
+        ]
+    )
+    assert _reasoning_text(message) == "visible chain of thought"
+
+    redacted_only = _assistant([RedactedReasoningBlock(data="opaque-blob")])
+    assert _reasoning_text(redacted_only) is None
+
+
+def test_stirrup_publishes_trajectory_to_convention_dir(tmp_path: Path):
+    agent = StirrupAgent(logs_dir=tmp_path, model_name="anthropic/claude-haiku-4-5")
+    (tmp_path / "trajectory.json").write_text("{}", encoding="utf-8")
+    env = FakeHarborEnvironment()
+    asyncio.run(agent._publish_trajectory(cast(BaseEnvironment, env)))
+    assert len(env.calls) == 1
+    command = env.calls[0]["command"]
+    assert "mkdir -p /logs/artifacts/agent" in command
+    assert "/logs/agent/trajectory.json" in command
+    assert command.rstrip().endswith("/logs/artifacts/agent/trajectory.json")
+
+
+def test_stirrup_publish_failure_is_best_effort(tmp_path: Path):
+    """A publish failure (environment down, non-zero exit) must never fail
+    the agent run -- it only costs the transcript-derived diagnostics."""
+    agent = StirrupAgent(logs_dir=tmp_path, model_name="anthropic/claude-haiku-4-5")
+    (tmp_path / "trajectory.json").write_text("{}", encoding="utf-8")
+    # exec raises -> swallowed
+    down = FakeHarborEnvironment(exc=RuntimeError("environment down"))
+    asyncio.run(agent._publish_trajectory(cast(BaseEnvironment, down)))
+    # exec exits non-zero -> swallowed
+    refused = FakeHarborEnvironment(return_code=1, stderr="permission denied")
+    asyncio.run(agent._publish_trajectory(cast(BaseEnvironment, refused)))
 
 
 def test_catalog_cost_none_for_unknown_model(tmp_path: Path):

@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 from ._common import INPUT_SUBPATHS, matching
@@ -40,7 +41,9 @@ def _allowed_symlink_roots(scenario_dir: Path) -> frozenset[Path]:
         from huggingface_hub.constants import HF_HUB_CACHE
 
         roots.add(Path(HF_HUB_CACHE).resolve())
-    except Exception:  # pragma: no cover - optional dep/env quirk, not fatal
+    except (ImportError, TypeError, OSError):  # pragma: no cover, noqa: S110
+        # optional dep/env quirk, not fatal: the cache root is a convenience
+        # allowance, never a requirement -- nothing to log and nothing to do
         pass
     return frozenset(roots)
 
@@ -122,34 +125,14 @@ def _sha256(path: Path) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
-def _assert_not_answer_key_bytes(
-    path: Path, src: Path, gt_fingerprint: tuple[int, str] | None
-) -> None:
-    """Content-level backstop to the name check: a byte-identical COPY of the
-    scenario's ground_truth.yaml smuggled in under any other name (plain
-    file or through a renamed symlink) is rejected too. Size pre-filter
-    keeps this free for all the non-matching inputs."""
-    if gt_fingerprint is None or not path.is_file():
-        return
-    try:
-        if path.stat().st_size != gt_fingerprint[0]:
-            return
-        if _sha256(path) != gt_fingerprint:
-            return
-    except OSError:
-        return
-    raise RuntimeError(
-        f"refusing to stage {path} found inside input tree {src}: it is a "
-        "byte-identical copy of ground_truth.yaml under another name"
-    )
-
-
 #: Keys that only exist in the answer-key schema, never in scenario telemetry.
 _ANSWER_KEY_MARKERS = ("root_cause", "fault_mechanism")
 
-#: Chunk size for the bounded-memory answer-key smuggle scan; every staged
-#: regular file is scanned in full, whatever its size or extension, so a
-#: padded or oversized smuggled copy cannot evade the check.
+#: Chunk size for the bounded-memory answer-key smuggle scan. The scan rides
+#: the copy pass (see _copy_file_scanning), so this doubles as the copy block
+#: size; every staged regular file is still scanned in full, whatever its
+#: size or extension, so a padded or oversized smuggled copy cannot evade the
+#: check.
 _SCANNED_TEXT_CHUNK_BYTES = 8 * 1024 * 1024
 
 
@@ -169,7 +152,9 @@ def _answer_key_identifiers(item: ScenarioItem) -> list[str]:
             ids.add(f"{namespace or 'cluster'}/{kind}/{name}")
             try:
                 patterns = matching.group_patterns(root)
-            except Exception:  # defensive: identifier extraction never fails
+            except Exception:  # noqa: BLE001 - defensive by design
+                # identifier extraction never fails the whole scan: a
+                # malformed ground-truth shape degrades to fewer ids
                 patterns = []
             if patterns:
                 literal = matching.derive_matching_literal(root, patterns)
@@ -178,48 +163,100 @@ def _answer_key_identifiers(item: ScenarioItem) -> list[str]:
     return [i for i in ids if len(i) >= 4]
 
 
-def _assert_not_answer_key_text(path: Path, src: Path, identifiers: list[str]) -> None:
-    """Content-level backstop: reject any staged file that combines an
-    answer-key schema marker with one of the root-cause entity identifiers
-    -- the signature of a ground_truth.yaml renamed, reformatted, excerpted,
-    or padded into the input tree. Every staged regular file is scanned in
-    full, in raw bytes and bounded chunks, regardless of size or extension:
-    co-occurrence of marker AND identifier IN EITHER ORDER keeps false
-    positives near zero (telemetry never carries the answer-key schema keys),
-    and chunk tails overlap by the longest needle so a signature straddling a
-    chunk boundary still trips the check. Detecting the identifier only once
-    a marker has already been seen would let padding placed BEFORE the marker
-    hide it, so both signals are tracked independently and the file is only
-    accepted when at most one of them ever occurs. A fully rewritten semantic
-    copy or a recompressed payload stays out of reach (documented limitation:
-    the trust boundary is the pinned HF revision plus human review, not
-    content scanning)."""
-    if not identifiers or not path.is_file():
-        return
+def _copy_file_scanning(
+    src: Path,
+    dst: Path,
+    scan_root: Path,
+    gt_fingerprint: tuple[int, str] | None,
+    identifiers: list[str],
+) -> None:
+    """Copy one file to ``dst`` in a single read pass, running both
+    content-level answer-key checks on the very bytes being written:
+
+    * a byte-identical COPY of the scenario's ground_truth.yaml under any
+      other name -- the running SHA-256 (and size) is compared against the
+      ground truth's fingerprint after the pass;
+    * a file pairing an answer-key schema marker with a root-cause entity
+      identifier -- the signature of a ground_truth.yaml renamed,
+      reformatted, excerpted, or padded into the input tree.
+
+    Fusing the checks into the copy keeps generation I/O at one pass per
+    file: the staged telemetry runs to ~1.2GB per scenario, and a separate
+    full-read scan pass (as this used to be) roughly doubled it. Every
+    staged byte is still scanned in full, in raw bytes and bounded chunks,
+    regardless of size or extension: co-occurrence of marker AND identifier
+    IN EITHER ORDER keeps false positives near zero (telemetry never
+    carries the answer-key schema keys), and chunk tails overlap by the
+    longest needle so a signature straddling a chunk boundary still trips
+    the check. Detecting the identifier only once a marker has already
+    been seen would let padding placed BEFORE the marker hide it, so both
+    signals are tracked independently and the file is only accepted when
+    at most one of them ever occurs. A fully rewritten semantic copy or a
+    recompressed payload stays out of reach (documented limitation: the
+    trust boundary is the pinned HF revision plus human review, not
+    content scanning).
+
+    A reject raises only after that file has been (partially) written: the
+    caller either renders into a throwaway task dir that is renamed into
+    place only on success (adapter._render_task) or aborts the whole stage,
+    so rejected bytes never survive in a generated task.
+    """
+    _assert_not_ground_truth(src, scan_root)
+    if not src.is_file():
+        # copy2/copyfile refuse non-regular files; mirror that instead of
+        # blocking forever on e.g. a FIFO.
+        raise shutil.SpecialFileError(f"unable to copy non-regular file {src!r}")
     marker_needles = [m.encode("utf-8") for m in _ANSWER_KEY_MARKERS]
     id_needles = [(i, i.encode("utf-8")) for i in identifiers]
     overlap = max([len(n) for n in marker_needles] + [len(b) for _, b in id_needles])
-    try:
-        with path.open("rb") as handle:
-            tail = b""
-            marker_seen = False
-            id_hit: str | None = None
-            while chunk := handle.read(_SCANNED_TEXT_CHUNK_BYTES):
+    digest = hashlib.sha256()
+    size = 0
+    tail = b""
+    marker_seen = False
+    id_hit: str | None = None
+    with src.open("rb") as source, dst.open("wb") as target:
+        while chunk := source.read(_SCANNED_TEXT_CHUNK_BYTES):
+            target.write(chunk)
+            size += len(chunk)
+            digest.update(chunk)
+            if id_needles:
                 buffer = tail + chunk
                 marker_seen = marker_seen or any(m in buffer for m in marker_needles)
                 if id_hit is None:
                     id_hit = next((s for s, b in id_needles if b in buffer), None)
-                if marker_seen and id_hit is not None:
-                    raise RuntimeError(
-                        f"refusing to stage {path} found inside input "
-                        f"tree {src}: it pairs an answer-key schema "
-                        f"marker with the root-cause identifier {id_hit!r} "
-                        "-- ground_truth.yaml content smuggled into "
-                        "the agent-visible inputs under another shape"
-                    )
                 tail = buffer[-overlap:]
-    except OSError:
-        return
+    # Fingerprint first (same precedence as the old pre-copy checks): a
+    # byte-identical smuggle reports the sharper diagnosis, not the marker
+    # signature it also carries.
+    if gt_fingerprint is not None and (size, digest.hexdigest()) == gt_fingerprint:
+        raise RuntimeError(
+            f"refusing to stage {src} found inside input tree {scan_root}: it "
+            "is a byte-identical copy of ground_truth.yaml under another name"
+        )
+    if marker_seen and id_hit is not None:
+        raise RuntimeError(
+            f"refusing to stage {src} found inside input tree {scan_root}: it "
+            f"pairs an answer-key schema marker with the root-cause "
+            f"identifier {id_hit!r} -- ground_truth.yaml content smuggled "
+            "into the agent-visible inputs under another shape"
+        )
+    shutil.copystat(src, dst)
+
+
+def _make_scanning_copy(
+    scan_root: Path,
+    gt_fingerprint: tuple[int, str] | None,
+    identifiers: list[str] | None,
+) -> Callable[[str | Path, str | Path], None]:
+    """A ``shutil.copytree`` copy_function (and single-file copy) running the
+    fused scan-and-copy above for every staged file."""
+
+    def copy_file(src: str | Path, dst: str | Path) -> None:
+        _copy_file_scanning(
+            Path(src), Path(dst), scan_root, gt_fingerprint, identifiers or []
+        )
+
+    return copy_file
 
 
 def _stage_one(
@@ -230,7 +267,10 @@ def _stage_one(
     leak_identifiers: list[str] | None = None,
 ) -> None:
     """Copy a file or directory to dst, resolving HF-cache symlinks so the
-    build context holds real bytes rather than dangling relative links."""
+    build context holds real bytes rather than dangling relative links.
+    File content is scanned for answer-key leaks while it is copied (see
+    _copy_file_scanning); the pre-copy walk bounds symlinks, rejects
+    cycles, and name-checks every entry."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     # The input path ITSELF may be a symlink (dir or file): the walk bounds
     # links found as entries, so without this check a directory symlink aimed
@@ -239,17 +279,18 @@ def _stage_one(
     # copytree(symlinks=False).
     if src.is_symlink():
         _assert_symlink_within_roots(src, src, allowed_roots)
+    copy_file = _make_scanning_copy(src, gt_fingerprint, leak_identifiers)
     if src.is_dir():
+        # Bound symlinks + reject cycles + name-check every entry BEFORE the
+        # copy starts: copytree itself would recurse forever on a cycle, and
+        # name rejects should fire before any byte is staged.
         for entry in _walk_following_links(src, allowed_roots):
             _assert_not_ground_truth(entry, src)
-            _assert_not_answer_key_bytes(entry, src, gt_fingerprint)
-            _assert_not_answer_key_text(entry, src, leak_identifiers or [])
-        shutil.copytree(src, dst, symlinks=False, dirs_exist_ok=True)
+        shutil.copytree(
+            src, dst, symlinks=False, dirs_exist_ok=True, copy_function=copy_file
+        )
     else:
-        _assert_not_ground_truth(src, src)
-        _assert_not_answer_key_bytes(src, src, gt_fingerprint)
-        _assert_not_answer_key_text(src, src, leak_identifiers or [])
-        shutil.copy2(src.resolve(), dst)
+        copy_file(src, dst)
 
 
 def stage_input_data(task_dir: Path, item: ScenarioItem) -> None:

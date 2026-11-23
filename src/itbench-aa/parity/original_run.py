@@ -158,7 +158,12 @@ def load_results(path: Path) -> dict[str, Any]:
             "discard every prior run it held)"
         ) from e
     if not isinstance(doc, dict):
-        raise ValueError(
+        # ValueError, not TypeError (TRY004): the shape comes from parsed
+        # file bytes, not a caller's argument -- this keeps the uniform
+        # repair-it contract of the loader (json.JSONDecodeError, itself a
+        # ValueError, is raised one branch above), and callers/tests catch
+        # ValueError for every shape error in this file.
+        raise ValueError(  # noqa: TRY004 - rationale above
             f"{path}: expected a JSON object at top level, got "
             f"{type(doc).__name__}; repair or move the file aside"
         )

@@ -219,14 +219,29 @@ async def build_matrix(
 ) -> dict[str, Any]:
     """Compute the 2x2 matrix + disagreement list (see module docstring)."""
     config = config or JudgeClientConfig()
-    gt_cache: dict[str, tuple[str, dict[str, Any]]] = {}
+    gt_cache: dict[str, tuple[str, dict[str, Any]] | None] = {}
 
-    def ground_truth(task_id: str) -> tuple[str, dict[str, Any]]:
+    def ground_truth(task_id: str) -> tuple[str, dict[str, Any]] | None:
         if task_id not in gt_cache:
-            text = (tasks_root / task_id / "tests" / "ground_truth.yaml").read_text(
-                encoding="utf-8"
-            )
-            gt_cache[task_id] = (text, load_ground_truth(text))
+            try:
+                text = (tasks_root / task_id / "tests" / "ground_truth.yaml").read_text(
+                    encoding="utf-8"
+                )
+            except OSError as e:
+                # A staged answer whose scenario was pruned/renamed after
+                # regeneration must degrade the same way judge.grade_answers_dir
+                # handles it (warn + skip), not abort the whole 2x2 matrix --
+                # this can fire after real API spend on the other cells.
+                logger.warning(
+                    "skipping %s: ground truth unreadable under %s (%s); "
+                    "regenerate tasks and re-stage answers",
+                    task_id,
+                    tasks_root,
+                    e,
+                )
+                gt_cache[task_id] = None
+            else:
+                gt_cache[task_id] = (text, load_ground_truth(text))
         return gt_cache[task_id]
 
     cells: dict[str, CellAccumulator] = {
@@ -252,7 +267,10 @@ async def build_matrix(
         rules_views: dict[str, dict[str, Any]] = {}
         judge_views: dict[str, dict[str, Any]] = {}
         for task_id, run, answer in keys:
-            gt_text, gt_raw = ground_truth(task_id)
+            gt = ground_truth(task_id)
+            if gt is None:
+                continue  # warned in ground_truth(); stale staged answer
+            gt_text, gt_raw = gt
             key = f"{task_id}/run{run}"
 
             rules = apply_rules(answer, gt_raw)

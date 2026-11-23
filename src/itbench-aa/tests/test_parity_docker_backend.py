@@ -21,8 +21,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import parity_helpers  # noqa: F401  (installs parity/ on sys.path)
 import docker_backend
+import parity_helpers  # noqa: F401  (installs parity/ on sys.path)
 from docker_backend import (
     TIMEOUT_TOKEN_PREFIX,
     DockerBackend,
@@ -34,6 +34,7 @@ from docker_backend import (
     image_build,
     image_exists,
 )
+
 from itbench_aa.stirrup_runner import BackendResult
 
 

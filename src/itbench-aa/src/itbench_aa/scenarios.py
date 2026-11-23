@@ -60,20 +60,36 @@ def _input_path_exists(scenario_dir: Path, subpath: str) -> bool:
     return (scenario_dir / subpath).exists()
 
 
+def _has_scenario_dirs(directory: Path) -> bool:
+    """True when ``directory`` directly holds at least one ``Scenario-<N>/``
+    directory -- the exact shape ``_enumerate_items`` enumerates. A plain
+    file or a non-numeric name matching the ``Scenario-*`` glob does not
+    count: accepting either as the dataset root would pass detection here
+    and then die downstream with the generic "no valid scenarios found"
+    error instead of the clear bad-layout error."""
+    return any(
+        p.is_dir() and SCENARIO_DIR_RE.match(p.name)
+        for p in directory.glob("Scenario-*")
+    )
+
+
 def _find_scenario_root_in(root: Path) -> Path | None:
     """Return the directory under ``root`` that directly holds ``Scenario-*/``,
     checking, in order: ``root`` itself, the flat ``root/sre/`` layout
     ArtificialAnalysis/ITBench-AA ships, and the wrapped ``root/snapshots/sre/
     <one-dir>/`` layout older mirrors used. ``None`` if none match."""
-    if any(root.glob("Scenario-*")):
+    if _has_scenario_dirs(root):
         return root
     flat = root / "sre"
-    if flat.is_dir() and any(flat.glob("Scenario-*")):
+    if flat.is_dir() and _has_scenario_dirs(flat):
         return flat
     wrapped_parent = root / "snapshots" / "sre"
     if wrapped_parent.is_dir():
         subdirs = sorted(p for p in wrapped_parent.glob("*") if p.is_dir())
-        if len(subdirs) == 1:
+        # The wrapped layout holds exactly one real snapshot dir; a stale or
+        # empty leftover (e.g. snapshots/sre/cache/) must not be accepted as
+        # the dataset root -- verify it actually contains scenarios first.
+        if len(subdirs) == 1 and _has_scenario_dirs(subdirs[0]):
             return subdirs[0]
     return None
 

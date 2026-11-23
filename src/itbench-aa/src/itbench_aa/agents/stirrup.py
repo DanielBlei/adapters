@@ -22,18 +22,6 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Self, override
 
-from stirrup import (
-    AssistantMessage,
-    LLMClient,
-    SystemMessage,
-    TextBlock,
-    ToolMessage,
-    UserMessage,
-    reasoning_blocks,
-    tool_call_blocks,
-)
-from stirrup.utils.logging import AgentLoggerBase
-
 from harbor.agents.base import BaseAgent
 from harbor.agents.capabilities import AgentCapabilities
 from harbor.models.agent.context import AgentContext
@@ -48,6 +36,18 @@ from harbor.models.trajectories import (
 )
 from harbor.models.trajectories import ToolCall as AtifToolCall
 from harbor.utils.trajectory_utils import format_trajectory_json
+from stirrup import (
+    AssistantMessage,
+    LLMClient,
+    SystemMessage,
+    TextBlock,
+    ToolMessage,
+    UserMessage,
+    reasoning_blocks,
+    tool_call_blocks,
+)
+from stirrup.utils.logging import AgentLoggerBase
+
 from itbench_aa.stirrup_runner import (
     AA_MAX_TURNS,
     AA_WARNING_THRESHOLD,
@@ -192,11 +192,15 @@ def _assistant_text(message: AssistantMessage) -> str:
 
 
 def _reasoning_text(message: AssistantMessage) -> str | None:
-    """Join any reasoning blocks of an assistant message (None when absent)."""
+    """Join the readable reasoning blocks of an assistant message (None when
+    absent). Provider-redacted thinking blocks (e.g. Anthropic
+    ``redacted_thinking``) carry only an opaque ``data`` payload, not model
+    reasoning -- they are omitted rather than written into the trajectory as
+    if they were reasoning."""
     texts = [
         text
         for block in reasoning_blocks(message.blocks)
-        if (text := getattr(block, "content", None) or getattr(block, "data", None))
+        if isinstance((text := getattr(block, "content", None)), str) and text
     ]
     return "\n".join(texts) if texts else None
 
@@ -361,6 +365,7 @@ class StirrupAgent(BaseAgent):
         )
         self._last_run = run
         self._dump_trajectory()
+        await self._publish_trajectory(environment)
         logger.debug(
             "stirrup run done: finished=%s turns=%d",
             run.finished,
@@ -368,6 +373,36 @@ class StirrupAgent(BaseAgent):
         )
 
     # -- trajectory ---------------------------------------------------------
+
+    async def _publish_trajectory(self, environment: BaseEnvironment) -> None:
+        """Copy the dumped ATIF trajectory into the conventional artifacts
+        publish dir (``/logs/artifacts/agent/``).
+
+        The separate verifier sandbox receives only declared task artifacts
+        plus the convention dir: ``/logs/agent`` is bind-mounted into the
+        agent container alone, and declaring it as a task artifact is
+        forbidden (harbor lint ``artifact-log-overlap``). Publishing the
+        trajectory through the convention dir -- collected automatically and
+        re-materialized at the same path in the verifier -- is what lets
+        grade.py keep its transcript-derived diagnostics (turn_count, the
+        answer-recovery fallback) in separate-verifier mode. Best-effort by
+        design: a publish failure costs those diagnostics, never the run.
+        """
+        source = f"{self.environment_logs_dir}/trajectory.json"
+        target = "/logs/artifacts/agent/trajectory.json"
+        try:
+            result = await environment.exec(
+                command=f"mkdir -p /logs/artifacts/agent && cp {source} {target}"
+            )
+        except Exception:
+            logger.debug("trajectory publish to %s failed", target, exc_info=True)
+            return
+        if result.return_code != 0:
+            logger.debug(
+                "trajectory publish exited %s: %s",
+                result.return_code,
+                getattr(result, "stderr", None),
+            )
 
     def _build_steps(self, history: list[list[Any]]) -> list[Step]:
         """Map stirrup message history to ATIF steps.

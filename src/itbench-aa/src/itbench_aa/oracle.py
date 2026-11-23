@@ -46,7 +46,12 @@ def _root_factor(item: ScenarioItem, gt: dict, root: dict) -> dict:
     all_faults = [f for f in gt.get("fault", []) or [] if isinstance(f, dict)]
 
     def _is_root_fault(fault: dict) -> bool:
-        entity = fault.get("entity", {}) or {}
+        # Shape-tolerant: _validate_scenario does not pin fault[].entity's
+        # type, and a malformed entry must degrade to "not the root fault",
+        # not abort the whole generation run mid-render.
+        entity = fault.get("entity")
+        if not isinstance(entity, dict):
+            return False
         return entity.get("group_id") == root_id or entity.get("name") in (
             root_id,
             root_name,
@@ -57,7 +62,9 @@ def _root_factor(item: ScenarioItem, gt: dict, root: dict) -> dict:
 
     bits: list[str] = []
     for fault in faults:
-        entity = fault.get("entity", {}) or {}
+        entity = fault.get("entity")
+        if not isinstance(entity, dict):
+            entity = {}
         cond = fault.get("condition")
         mech = fault.get("fault_mechanism")
         desc = (
@@ -112,13 +119,22 @@ def _oracle_answer(item: ScenarioItem) -> dict:
 
     factors = [_root_factor(item, gt, root) for root in root_groups]
 
+    # Shape-tolerant, like _root_factor above: _validate_scenario does not
+    # pin recommended_actions[].solution's type, so a malformed entry (e.g.
+    # a plain string where a mapping is expected) degrades to "no action"
+    # instead of raising AttributeError mid-render.
+    actions: list[str] = []
+    for rec in gt.get("recommended_actions") or []:
+        if not isinstance(rec, dict):
+            continue
+        solution = rec.get("solution")
+        if not isinstance(solution, dict):
+            continue
+        for action in solution.get("actions") or []:
+            if isinstance(action, str):
+                actions.append(action)
+
     return {
         "contributing_factors": factors,
-        "recommended_actions": [
-            action
-            for rec in gt.get("recommended_actions", []) or []
-            if isinstance(rec, dict)
-            for action in (rec.get("solution", {}) or {}).get("actions", []) or []
-            if isinstance(action, str)
-        ],
+        "recommended_actions": actions,
     }

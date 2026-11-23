@@ -11,8 +11,10 @@ Nothing here is model-based. Every step is a file read and a string comparison.
    the agent harness supplies its own system prompt, which this adapter does not control or override.
 2. **The agent investigates and writes one file.** The telemetry is read-only and there is no cluster to query.
    The only output that counts is `/workspace/answer.json`.
-3. **Verification runs `tests/grade.py`** (via `tests/test.sh`). It loads `answer.json` and the hidden
-   `tests/ground_truth.yaml`, which never entered the agent's image. (Upstream publishes the keys in two shapes --
+3. **Verification runs `tests/grade.py`** (via `tests/test.sh`) in a separate verifier container
+   (`tests/Dockerfile`), isolated from the agent's filesystem. It loads `answer.json` and the hidden
+   `tests/ground_truth.yaml`, which never entered the agent's image (it is baked into the local, never-published
+   verifier image; the key is already public in the source HF dataset). (Upstream publishes the keys in two shapes --
    flat, and Kubernetes-wrapped under `apiVersion`/`kind`/`metadata`/`spec`, 31 and 9 of the 40 respectively; the
    grader unwraps both to the same flat form.)
 4. **Each submitted entity is normalized against the ground truth** by `tests/matching.py`, using the rules under
@@ -161,8 +163,9 @@ conditioned_rate = mean(namespace_match) / mean(namespace_applicable)
 
 ## Oracle verification
 
-All 40 scenarios score `reward = 1.000` under the oracle (Harbor 0.23.0, 2026-09-24, dataset revision
-`76df38a82288f75ba9e41dc8c515033332497473`). Every scoring and identity diagnostic is a clean 1.000 -- the oracle
+All 40 scenarios score `reward = 1.000` under the oracle (Harbor 0.27.0, 2026-11-23, dataset revision
+`76df38a82288f75ba9e41dc8c515033332497473`, separate verifier; previously also 40/40 under Harbor 0.23.0 with
+the shared verifier). Every scoring and identity diagnostic is a clean 1.000 -- the oracle
 names the real resource, with the correct kind and a reasoning string that references it. `namespace_match`
 conditions to 1.000 (raw mean 39/40): scenario-102 has a cluster-scoped root cause, so its `namespace_applicable`
 is 0 and the raw mean is diluted, exactly the case the conditioning in

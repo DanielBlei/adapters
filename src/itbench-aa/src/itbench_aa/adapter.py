@@ -20,6 +20,8 @@ import json
 import re
 import shlex
 import shutil
+import sys
+import uuid
 from pathlib import Path
 
 from ._common import DEFAULT_HF_REPO, TASK_TEMPLATE_DIR
@@ -105,16 +107,42 @@ class ITBenchAAAdapter:
         # any --task-ids/--limit filtering -- used to report real coverage
         # in the generated runbook (see runbook.write_runbook), so that text
         # stays accurate however much of the snapshot has actually been
-        # fetched.
+        # fetched. When the HF fetch itself was narrowed to a --task-ids
+        # subset, the runbook must not present this subset count as
+        # whole-corpus coverage (see runbook.write_runbook).
         total_valid_scenarios = len(items)
+        snapshot_narrowed = scenario_numbers is not None and self.dataset_path is None
 
         if self.task_ids:
-            wanted = set(self.task_ids)
-            items = [it for it in items if it.task_id in wanted]
+            # Normalize requested ids through the same scenario-(\d+) parse
+            # that narrowed the download above, so a zero-padded request
+            # like "scenario-007" matches the rendered "scenario-7" instead
+            # of silently filtering out every item.
+            wanted = {
+                f"scenario-{int(m.group(1))}"
+                if (m := re.match(r"scenario-(\d+)$", t))
+                else t
+                for t in self.task_ids
+            }
+            matched = [it for it in items if it.task_id in wanted]
+            not_found = sorted(wanted - {it.task_id for it in matched})
+            if not_found:
+                print(
+                    f"WARNING: --task-ids {not_found} matched no valid scenario "
+                    f"under {snapshot_root}",
+                    file=sys.stderr,
+                )
+            items = matched
         if self.limit is not None:
             items = items[: self.limit]
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        # Render-temp dirs abandoned by an interrupted earlier run (SIGKILL
+        # mid-render; see _render_task): remove them so they never linger
+        # beside the tasks. They never match the scenario-* glob, but would
+        # otherwise accumulate.
+        for stale in self.output_dir.glob(".scenario-*.render-*"):
+            shutil.rmtree(stale, ignore_errors=True)
 
         generated = 0
         for item in items:
@@ -137,19 +165,41 @@ class ITBenchAAAdapter:
             1 for p in self.output_dir.glob("scenario-*") if p.is_dir()
         )
         write_runbook(
-            self.output_dir, snapshot_root, total_valid_scenarios, existing_task_count
+            self.output_dir,
+            snapshot_root,
+            total_valid_scenarios,
+            existing_task_count,
+            snapshot_narrowed=snapshot_narrowed,
         )
         print(f"done: generated {generated} task(s) into {self.output_dir}")
 
     def _render_task(self, dst: Path, item: ScenarioItem) -> None:
+        """Render one task into ``dst`` atomically: everything is built in a
+        throwaway sibling directory and renamed into place only once the
+        render fully succeeds. A failure mid-render (a bad ground-truth
+        shape, staging refusing an out-of-root symlink, disk full during
+        the ~1GB workspace copy) must never leave a half-built task
+        directory behind -- every later non---overwrite run would silently
+        skip it as "already exists" and ship the broken task."""
+        tmp_dir = dst.with_name(f".{dst.name}.render-{uuid.uuid4().hex[:12]}")
+        try:
+            self._render_task_into(tmp_dir, item)
+            if dst.exists():  # defensive: run() already removed it
+                shutil.rmtree(dst)
+            tmp_dir.rename(dst)
+        except BaseException:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
+
+    def _render_task_into(self, task_dir: Path, item: ScenarioItem) -> None:
         shutil.copytree(
             TASK_TEMPLATE_DIR,
-            dst,
+            task_dir,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
 
         # task.toml
-        task_toml_path = dst / "task.toml"
+        task_toml_path = task_dir / "task.toml"
         task_toml = task_toml_path.read_text()
         task_toml = task_toml.replace("{task_id}", item.task_id)
         task_toml_path.write_text(task_toml)
@@ -162,7 +212,7 @@ class ITBenchAAAdapter:
         # answer known at generation time (see oracle._oracle_answer).
         # shlex.quote so nothing in the (possibly third-party) ground-truth
         # strings is shell-interpolated.
-        solve_path = dst / "solution" / "solve.sh"
+        solve_path = task_dir / "solution" / "solve.sh"
         answer_json = json.dumps(_oracle_answer(item))
         solve_sh = (
             "#!/bin/sh\n"
@@ -179,13 +229,13 @@ class ITBenchAAAdapter:
         # tests/matching.py already shipped via the copytree above (the
         # single source of truth also used by oracle._oracle_answer() above).
         gt_src = item.scenario_dir / "ground_truth.yaml"
-        gt_dst = dst / "tests" / "ground_truth.yaml"
+        gt_dst = task_dir / "tests" / "ground_truth.yaml"
         shutil.copyfile(gt_src, gt_dst)
-        test_sh_path = dst / "tests" / "test.sh"
+        test_sh_path = task_dir / "tests" / "test.sh"
         test_sh_path.chmod(0o755)
 
         # environment/workspace/ -- stage the 6 input subpaths into the Docker
         # build context and append the COPY directive so the image is
         # self-contained (see data_delivery.stage_input_data). ground_truth.yaml
         # is deliberately never staged.
-        stage_input_data(dst, item)
+        stage_input_data(task_dir, item)

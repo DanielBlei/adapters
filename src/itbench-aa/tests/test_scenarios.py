@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Unit tests for scenarios.py validation -- especially the all-roots
 gradeability gate (a later ungradeable root must skip the scenario at
 validation time, not abort generation from the oracle mid-render).
@@ -11,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -20,10 +20,13 @@ SRC_DIR = ADAPTER_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-import yaml  # noqa: E402
+import yaml
 
-from itbench_aa._common import matching  # noqa: E402
-from itbench_aa.scenarios import _validate_scenario  # noqa: E402
+from itbench_aa._common import matching
+from itbench_aa.scenarios import (
+    _find_scenario_root_in,
+    _validate_scenario,
+)
 
 _VALID_GT = """
 groups:
@@ -116,11 +119,52 @@ aliases:
     assert [r["id"] for r in roots] == ["pod-a-1"]
 
 
+# ---------------------------------------------------------------------------
+# Dataset-root detection (_find_scenario_root_in)
+# ---------------------------------------------------------------------------
+
+
+def test_find_scenario_root_requires_real_scenario_dirs(tmp_path: Path):
+    """A plain file matching Scenario-* must not pass as a dataset root:
+    detection would succeed and generation would then die with the generic
+    "no valid scenarios found" instead of the clear bad-layout error."""
+    (tmp_path / "Scenario-notes").write_text("not a scenario\n")
+    assert _find_scenario_root_in(tmp_path) is None
+
+
+def test_find_scenario_root_accepts_flat_and_wrapped_layouts(tmp_path: Path):
+    scenario = _make_scenario(tmp_path, _VALID_GT)
+    assert _find_scenario_root_in(tmp_path) == tmp_path
+
+    flat = tmp_path / "sre"
+    flat.mkdir()
+    shutil.move(str(scenario), str(flat / "Scenario-1"))
+    assert _find_scenario_root_in(tmp_path) == flat
+
+
+def test_find_scenario_root_rejects_stale_wrapped_dir(tmp_path: Path):
+    """The wrapped mirror layout with an empty leftover dir where the real
+    snapshot should be must return None (clear layout error downstream),
+    not be accepted as the dataset root."""
+    stale = tmp_path / "stale-mirror"
+    (stale / "snapshots" / "sre" / "cache").mkdir(parents=True)
+    assert _find_scenario_root_in(stale) is None
+
+    # ...and a real snapshot inside the wrapped layout is still found.
+    mirror = tmp_path / "good-mirror"
+    revision = mirror / "snapshots" / "sre" / "76df38a"
+    _make_scenario(revision, _VALID_GT)
+    assert _find_scenario_root_in(mirror) == revision
+
+
 _TESTS = [
     test_valid_scenario_passes,
     test_later_ungradeable_root_skips_scenario,
     test_multiple_distinct_roots_kept_in_order,
     test_alias_merged_roots_deduped,
+    test_find_scenario_root_requires_real_scenario_dirs,
+    test_find_scenario_root_accepts_flat_and_wrapped_layouts,
+    test_find_scenario_root_rejects_stale_wrapped_dir,
 ]
 
 

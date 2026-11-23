@@ -44,13 +44,25 @@ ANSWER_PATH = Path("/workspace/answer.json")
 GROUND_TRUTH_PATH = Path(__file__).resolve().parent / "ground_truth.yaml"
 REWARD_DIR = Path("/logs/verifier")
 REWARD_PATH = REWARD_DIR / "reward.json"
-AGENT_LOGS_DIR = Path("/logs/agent")
+# Where agent transcripts are looked for, most-trusted first:
+# - /logs/agent: bind-mounted into the AGENT container (and into a
+#   same-container verifier). The separate verifier sandbox does NOT get
+#   this mount, and Harbor forbids declaring it as a task artifact (lint
+#   rule artifact-log-overlap), so there it is simply absent.
+# - /logs/artifacts/agent: the conventional artifacts publish dir, which
+#   Harbor collects automatically and re-materializes at the same path in
+#   the verifier sandbox -- where host-driven agents (e.g. stirrup)
+#   publish their trajectory for exactly this purpose.
+# The first dir that yields a recognized transcript wins, so an agent that
+# publishes a copy alongside its /logs/agent logs is never double-counted.
+TRANSCRIPT_DIRS = (Path("/logs/agent"), Path("/logs/artifacts/agent"))
 
 
 def _atif_agent_steps(path: Path) -> list[dict]:
     """Agent-side steps of an ATIF trajectory.json. Harbor-native agents
     (stirrup, oracle, claude code -- anything host-driven) write this instead of
-    a CLI transcript; Harbor uploads it to /logs/agent before verify.
+    a CLI transcript; it reaches the transcript dirs via the agent log mount
+    or the artifacts publish dir (see TRANSCRIPT_DIRS).
     Best-effort: [] on any parse failure."""
     try:
         doc = json.loads(path.read_text(errors="ignore"))
@@ -88,11 +100,11 @@ def _atif_step_texts(step: dict) -> list[str]:
 
 def _iter_transcript_texts(agent_dir: Path):
     """Yield (mtime, text) for every assistant message found in any
-    transcript file under /logs/agent/, in no particular order (caller sorts
-    by mtime). Supports JSONL session logs (role: assistant, content text
-    blocks), plain-text transcripts, and ATIF trajectory.json (harbor-native
-    agents). Best-effort: skips any file or line it can't parse rather than
-    raising.
+    transcript file under one transcript dir, in no particular order (caller
+    sorts by mtime). Supports JSONL session logs (role: assistant, content
+    text blocks), plain-text transcripts, and ATIF trajectory.json
+    (harbor-native agents). Best-effort: skips any file or line it can't
+    parse rather than raising.
     """
     if not agent_dir.is_dir():
         return
@@ -181,32 +193,39 @@ def _extract_json_objects(text: str) -> list[str]:
 def recover_answer_from_transcript() -> dict | None:
     """Last-resort recovery: scan the agent's own transcript (most recent
     text first) for a `contributing_factors` JSON blob it stated but never
-    wrote to /workspace/answer.json. Diagnostic only -- reward is capped at
-    0.0 for recovered answers. Never raises; returns None on any failure or
-    if nothing matches.
+    wrote to /workspace/answer.json. Candidate transcript dirs are tried in
+    TRANSCRIPT_DIRS order; the first match wins. Diagnostic only -- reward
+    is capped at 0.0 for recovered answers. Never raises; returns None on
+    any failure or if nothing matches.
     """
-    try:
-        candidates = sorted(
-            _iter_transcript_texts(AGENT_LOGS_DIR), key=lambda pair: pair[0]
-        )
-    except Exception:  # noqa: BLE001
-        # transcript dir may be missing/malformed; grader must not crash on it
-        return None
+    for agent_dir in TRANSCRIPT_DIRS:
+        if not agent_dir.is_dir():
+            continue
+        try:
+            candidates = sorted(
+                _iter_transcript_texts(agent_dir), key=lambda pair: pair[0]
+            )
+        except Exception:  # noqa: BLE001, S112
+            # transcript dir may be missing/malformed; the grader must not
+            # crash on diagnostics -- try the next dir silently
+            continue
 
-    for _, text in reversed(candidates):
-        for blob in reversed(_extract_json_objects(text)):
-            try:
-                candidate = json.loads(blob)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(candidate, dict):
-                continue
-            contributing = candidate.get("contributing_factors")
-            if isinstance(contributing, list) and contributing:
-                recovered = {"contributing_factors": contributing}
-                if isinstance(candidate.get("recommended_actions"), list):
-                    recovered["recommended_actions"] = candidate["recommended_actions"]
-                return recovered
+        for _, text in reversed(candidates):
+            for blob in reversed(_extract_json_objects(text)):
+                try:
+                    candidate = json.loads(blob)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(candidate, dict):
+                    continue
+                contributing = candidate.get("contributing_factors")
+                if isinstance(contributing, list) and contributing:
+                    recovered = {"contributing_factors": contributing}
+                    if isinstance(candidate.get("recommended_actions"), list):
+                        recovered["recommended_actions"] = candidate[
+                            "recommended_actions"
+                        ]
+                    return recovered
 
     return None
 
@@ -348,9 +367,9 @@ def _compute_reasoning_present(answer: dict, groups_by_id: dict[str, dict]) -> f
     return 0.0
 
 
-def _count_turns(agent_dir: Path) -> int:
-    """Count assistant turns across /logs/agent transcripts. Returns 0 if the dir
-    doesn't exist.
+def _count_turns_in(agent_dir: Path) -> int:
+    """Count assistant turns across one transcript dir's transcripts. Returns
+    0 if the dir doesn't exist.
 
     Three transcript schemas are supported:
     - pi / Anthropic-style JSONL: the canonical session log has one line per
@@ -400,11 +419,26 @@ def _count_turns(agent_dir: Path) -> int:
                     pi_count += 1
     if pi_count == 0 and not opencode_message_ids:
         # No CLI transcript recognized -- harbor-native agents log an ATIF
-        # trajectory.json (uploaded to /logs/agent by harbor pre-verify).
+        # trajectory.json (delivered via the transcript dirs).
         for path in agent_dir.rglob("*"):
             if path.is_file() and path.name == "trajectory.json":
                 pi_count += len(_atif_agent_steps(path))
     return pi_count + len(opencode_message_ids)
+
+
+def _count_turns() -> int:
+    """Count assistant turns across agent transcripts. Candidate dirs are
+    tried in TRANSCRIPT_DIRS order and the first that yields any turn wins:
+    in a same-container verifier /logs/agent holds everything, while in the
+    separate verifier sandbox only the artifacts-published copies exist (and
+    /logs/agent is absent) -- an agent present in both is never
+    double-counted. Returns 0 when no dir yields a recognized transcript.
+    """
+    for agent_dir in TRANSCRIPT_DIRS:
+        count = _count_turns_in(agent_dir)
+        if count:
+            return count
+    return 0
 
 
 def _echo_answer(answer: dict | None, recovered_from_transcript: bool) -> None:
@@ -438,7 +472,7 @@ def main() -> int:
 
     answer, answer_format_valid_bool, recovered_from_transcript = load_answer()
     answer_format_valid = 1.0 if answer_format_valid_bool else 0.0
-    turn_count = _count_turns(AGENT_LOGS_DIR)
+    turn_count = _count_turns()
 
     # Load ground truth
     ground_truth = None

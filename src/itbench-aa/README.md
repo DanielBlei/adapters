@@ -53,7 +53,17 @@ run configuration and the 19 private scenarios are not. How this adapter reprodu
   task's `environment/workspace/`, so the Dockerfile only `COPY`s it and image builds never download the dataset.
   (Builds still need network for apt/pip; the agent image bakes all packages because the *runtime* network is
   allowlisted.)
-- Answer-key isolation: `ground_truth.yaml` lands only in `tests/`, never in the image the agent sees. Staging
+- Separate verifier: grading runs in its own small container (`tests/Dockerfile`, `python:3.13-slim` + `pyyaml`),
+  not in the agent's sandbox -- Harbor's default for new tasks since v0.25 (harbor#3712). The agent cannot touch
+  the grader's filesystem or pre-write its reward. The scored submission (`/workspace/answer.json`) crosses over
+  as a declared task `artifact`, restored at its original path. Agent logs cannot be declared (`/logs/agent` is
+  harness-managed; harbor lint rejects it), so host-driven agents publish their trajectory into the conventional
+  `/logs/artifacts/agent/` dir, which Harbor collects automatically; the grader reads transcripts from there
+  (falling back to `/logs/agent` in same-container mode). Container-side CLI agents that never publish therefore
+  lose only the diagnostic `turn_count`/answer-recovery metrics, never reward.
+- Answer-key isolation: `ground_truth.yaml` lands only in `tests/`, never in the image the agent sees. It is baked
+  into the local verifier image at build time (the key is already public in the source HF dataset and these images
+  are local-only, so this adds no exposure). Staging
   additionally rejects answer-key content smuggled into an input tree -- by name (also through symlinked trees,
   cycles rejected), as a byte-identical copy under another name (size+SHA-256 fingerprint), or as any staged file
   pairing an answer-key schema key (`root_cause`/`fault_mechanism`) with a root-cause entity identifier; that scan
@@ -91,6 +101,7 @@ datasets/itbench-aa/
     ├── solution/
     │   └── solve.sh                # oracle: writes the ground-truth answer
     └── tests/
+        ├── Dockerfile              # verifier image (separate verifier sandbox)
         ├── test.sh                 # runs grade.py
         ├── grade.py                # deterministic grader
         ├── matching.py             # entity-matching rules (shared with oracle)
@@ -276,7 +287,9 @@ uv run --project src/itbench-aa --group parity harbor run -p datasets/itbench-aa
 ```
 
 All 40 tasks score `reward = 1.000`, both in the end-to-end test (`tests/test_oracle_end_to_end.py`) and in a full
-`harbor run` (Harbor 0.23.0, 2026-09-24, dataset revision `76df38a82288f75ba9e41dc8c515033332497473`). Per-metric
+`harbor run` (Harbor 0.27.0, 2026-11-23, dataset revision `76df38a82288f75ba9e41dc8c515033332497473`; previously
+also 40/40 under Harbor 0.23.0 with the shared verifier, 2026-09-24). The run uses the separate verifier
+(`verifier_environment_mode: "separate"` on every trial). Per-metric
 results are in [GRADING.md](GRADING.md#oracle-verification).
 
 ### Reproduction protocol
@@ -364,7 +377,7 @@ always name the same entity. AA's published judge prompt reads the same groups; 
 Docker or Podman and a working Harbor install are assumed. Harbor is an external dependency of this
 repository: install the CLI with `uv tool install harbor`, or use the adapter's pinned copy via
 `uv run --project src/itbench-aa --group parity harbor ...` (recommended -- the parity group pins
-`harbor==0.23.0`). Two things are specific to this adapter:
+`harbor==0.27.0`). Two things are specific to this adapter:
 
 - **Dataset access.** By default the dataset is downloaded from HuggingFace automatically, reusing the local cache
   when present. No auth is required; the dataset is public. To pre-download manually:
@@ -381,7 +394,8 @@ A subsequent generation run reuses that cached snapshot.
   `n_concurrent_trials: 4` (~48 GB RAM peak) and `force_build: true`, which rebuilds all 40 images (~0.5-1.2 GB each,
   every one embedding its telemetry) on the first pass -- the most common first-run failure is simply running out of
   RAM or disk. Lower `n_concurrent_trials` on smaller hosts and set `force_build: false` (or pass
-  `harbor run --no-force-build`) for repeat passes so warm images are reused.
+  `harbor run --no-force-build`) for repeat passes so warm images are reused. Each task also builds a second,
+  tiny verifier image (`tests/Dockerfile`, `python:3.13-slim` + `pyyaml`, seconds to build).
 
 ## Troubleshooting
 

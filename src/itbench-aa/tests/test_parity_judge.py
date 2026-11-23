@@ -162,7 +162,7 @@ def test_read_prompt_verbatim_real_files():
     assert "{ground_truth}" in grading and "{generated_response}" in grading
 
 
-def test_read_prompt_verbatim_rejects_missing_or_multiple_delimiters(tmp_path: Path):
+def test_read_prompt_verbatim_rejects_missing_delimiter(tmp_path: Path):
     missing = tmp_path / "missing.md"
     missing.write_text("no delimiter here\n")
     try:
@@ -171,13 +171,14 @@ def test_read_prompt_verbatim_rejects_missing_or_multiple_delimiters(tmp_path: P
     except ValueError as e:
         assert "no lone '---' delimiter" in str(e)
 
-    double = tmp_path / "double.md"
-    double.write_text("header\n---\nbody\n---\nmore\n")
-    try:
-        read_prompt_verbatim(double)
-        raise AssertionError("expected ValueError")
-    except ValueError as e:
-        assert "multiple" in str(e)
+
+def test_read_prompt_verbatim_keeps_body_horizontal_rules(tmp_path: Path):
+    """A `---` horizontal rule inside AA's own prompt text is verbatim
+    content, not a capture-format error: only the FIRST delimiter splits,
+    and everything after it -- further rules included -- is the prompt."""
+    body_rule = tmp_path / "body_rule.md"
+    body_rule.write_text("our header\n---\nAA text\n---\nmore AA text\n")
+    assert read_prompt_verbatim(body_rule) == "AA text\n---\nmore AA text"
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +377,40 @@ def test_judge_retries_with_backoff_and_gives_up(monkeypatch):
     except openai.APIConnectionError:
         pass
     assert len(calls2) == 3
+
+
+def test_judge_empty_choices_retried(monkeypatch):
+    """A 200 response with an empty choices list (transient overload on an
+    OpenAI-compatible proxy) must surface as an OpenAIError inside the
+    retry loop -- backoff, retry, eventual success -- not escape as a bare
+    IndexError that aborts the whole cross-grade after partial API spend."""
+
+    async def fake_sleep(delay: float) -> None:
+        pass
+
+    monkeypatch.setattr(judge.asyncio, "sleep", fake_sleep)
+
+    content = _judge_content([("otel-demo/Pod/checkout-1", "checkout-pod-1")])
+    calls: list[dict[str, Any]] = []
+
+    async def create(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return SimpleNamespace(choices=[])
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+        )
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    result = asyncio.run(
+        judge.grade_with_judge(
+            _answer(["otel-demo/Pod/checkout-1"]), GT_YAML, _config(), client=client
+        )
+    )
+    assert len(calls) == 2
+    assert result.scored.score == 1.0
 
 
 def test_judge_base_url_wiring(monkeypatch):
@@ -871,7 +906,7 @@ def _load_grade(tmp_path: Path) -> Any:
     grade.GROUND_TRUTH_PATH = tmp_path / "ground_truth.yaml"
     grade.REWARD_DIR = tmp_path / "logs" / "verifier"
     grade.REWARD_PATH = tmp_path / "logs" / "verifier" / "reward.json"
-    grade.AGENT_LOGS_DIR = tmp_path / "logs" / "agent"
+    grade.TRANSCRIPT_DIRS = (tmp_path / "logs" / "agent",)
     return grade
 
 

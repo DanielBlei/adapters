@@ -198,6 +198,29 @@ def test_load_harbor_answers_uses_side_suffix(fixtures: dict[str, Any]):
     assert broken == set()
 
 
+def test_matrix_skips_answer_with_missing_ground_truth(
+    fixtures: dict[str, Any], monkeypatch: Any
+):
+    """One staged answer whose task dir has no tests/ground_truth.yaml
+    (scenario pruned/renamed after the answers were staged) must be
+    skipped with a warning -- exactly like judge.grade_answers_dir -- not
+    abort the whole 2x2 matrix, which can fire after real API spend on
+    the other cells."""
+    _patch_judge(monkeypatch)
+    (fixtures["harbor_answers"] / "scenario-z__run1__harbor.json").write_text(
+        json.dumps(GOOD), encoding="utf-8"
+    )
+    matrix = _build(fixtures, judge_call=True)
+
+    harbor_rules = matrix["cells"]["harbor/rules"]["tasks"]["1"]
+    assert "scenario-z" not in harbor_rules
+    assert harbor_rules == {"scenario-a": 0.0, "scenario-b": 1.0}
+    harbor_judge = matrix["cells"]["harbor/judge"]["tasks"]["1"]
+    assert "scenario-z" not in harbor_judge
+    # the healthy pairs are untouched
+    assert harbor_judge == {"scenario-a": 1.0, "scenario-b": 0.0}
+
+
 # ---------------------------------------------------------------------------
 # cross_grade: 2x2 matrix + disagreements
 # ---------------------------------------------------------------------------

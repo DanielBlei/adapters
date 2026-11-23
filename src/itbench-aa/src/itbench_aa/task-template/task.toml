@@ -2,6 +2,17 @@
 
 schema_version = "1.0"
 
+# Agent outputs the separate verifier needs, restored at their original
+# container paths in the verifier sandbox: the scored submission. /logs/agent
+# itself is harness-managed (bind-mounted into the agent container only) and
+# may NOT be declared here (harbor lint artifact-log-overlap); the agent logs
+# the grader's diagnostics need cross over via the conventional
+# /logs/artifacts/ publish dir instead, which Harbor collects without any
+# declaration (see agents/stirrup.py and tests/grade.py).
+artifacts = [
+    { source = "/workspace/answer.json" },
+]
+
 [task]
 # {task_id} is filled in by the adapter at render time, e.g. "scenario-1".
 name = "artificialanalysis/itbench-aa__{task_id}"
@@ -24,10 +35,21 @@ difficulty = "hard"
 category = "sre-root-cause-analysis"
 
 [verifier]
+# The grader runs in its own small container (tests/Dockerfile), isolated
+# from the agent's filesystem; Harbor's default since v0.25.
+environment_mode = "separate"
 # The grader parses two local files; keep the timeout small.
 timeout_sec = 180.0
-# The grader never touches the network.
+# The grader never touches the network. Set on both the phase and the
+# verifier environment so the baseline equals the phase override.
 network_mode = "no-network"
+
+[verifier.environment]
+# Minimal dedicated verifier image (python:3.13-slim + pyyaml, built from
+# tests/Dockerfile) instead of a fresh copy of the ~1.2GB agent image.
+network_mode = "no-network"
+cpus = 1
+memory_mb = 512
 
 [agent]
 # AA runs offline, but Harbor agents self-install and call provider APIs at
@@ -46,6 +68,9 @@ allowed_hosts = [
     "*.npmjs.org",
     "nodejs.org",
     "*.nodejs.org",
+    # Claude Code binary bootstrap + model metadata (claude-code agent)
+    "downloads.claude.ai",
+    "models.dev",
     # Common model-provider APIs
     "api.anthropic.com",
     "api.openai.com",

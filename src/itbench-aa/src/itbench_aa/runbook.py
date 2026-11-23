@@ -17,15 +17,21 @@ def write_runbook(
     snapshot_root: Path,
     total_valid_scenarios: int,
     existing_task_count: int,
+    snapshot_narrowed: bool = False,
 ) -> None:
     readme_path = output_dir / "README.md"
     readme_path.write_text(
-        _runbook_text(snapshot_root, total_valid_scenarios, existing_task_count)
+        _runbook_text(
+            snapshot_root, total_valid_scenarios, existing_task_count, snapshot_narrowed
+        )
     )
 
 
 def _runbook_text(
-    snapshot_root: Path, total_valid_scenarios: int, existing_task_count: int
+    snapshot_root: Path,
+    total_valid_scenarios: int,
+    existing_task_count: int,
+    snapshot_narrowed: bool = False,
 ) -> str:
     try:
         snapshot_root_rel: Path | str = snapshot_root.relative_to(REPO_ROOT)
@@ -35,7 +41,19 @@ def _runbook_text(
     # output_dir contents -- do not hardcode a scenario count/name here,
     # it will drift the moment more of the snapshot is fetched or more
     # tasks are generated.
-    if existing_task_count >= total_valid_scenarios:
+    if snapshot_narrowed:
+        # The snapshot itself holds only the --task-ids subset (the HF fetch
+        # was narrowed), so total_valid_scenarios says nothing about corpus
+        # coverage: report what is actually present instead of claiming
+        # "all N valid scenarios generated" over a partial fetch.
+        coverage_note = (
+            f"{existing_task_count} task(s) are currently present in this directory. "
+            "The last generation run fetched only a `--task-ids` subset of the "
+            "dataset, so this is not whole-corpus coverage. Run without "
+            "`--task-ids` (add `--overwrite` to refresh existing tasks) to fetch "
+            "and generate the full set."
+        )
+    elif existing_task_count >= total_valid_scenarios:
         coverage_note = (
             f"All {total_valid_scenarios} valid scenario(s) found under "
             f"`{snapshot_root_rel}` have been generated as Harbor tasks."

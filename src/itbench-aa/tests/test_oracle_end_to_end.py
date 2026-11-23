@@ -73,7 +73,7 @@ def _load_grade(tmp_path: Path):
     grade.GROUND_TRUTH_PATH = tmp_path / "ground_truth.yaml"
     grade.REWARD_DIR = logs_verifier
     grade.REWARD_PATH = logs_verifier / "reward.json"
-    grade.AGENT_LOGS_DIR = logs_agent
+    grade.TRANSCRIPT_DIRS = (logs_agent,)
     return grade
 
 

@@ -45,7 +45,10 @@ uv run --project src/itbench-aa --group parity harbor run -p datasets/itbench-aa
 
 ### 2. Harbor side
 
-`--artifact` copies each trial's `/workspace/answer.json` out for the judge cells (staged in step 4).
+`/workspace/answer.json` is declared as a task `artifact` in `task.toml`, so Harbor copies each trial's
+submission out automatically (staged in step 4) -- no `--artifact` flag needed. Agent logs are not declared
+(`/logs/agent` is harness-managed; harbor lint rejects declaring it): the stirrup agent publishes its trajectory
+into the conventional `/logs/artifacts/agent/` dir, which Harbor collects without a declaration.
 
 ```bash
 uv run --project src/itbench-aa --group parity \
@@ -59,7 +62,7 @@ uv run --project src/itbench-aa --group parity \
 uv run --project src/itbench-aa --group parity \
   harbor run -p datasets/itbench-aa --job-name 1 \
   -a itbench_aa.agents.stirrup:StirrupAgent -m anthropic/claude-haiku-4-5-20251001 \
-  -n 4 --artifact /workspace/answer.json
+  -n 4
 ```
 
 ### 3. Original side
@@ -100,7 +103,7 @@ uv run --project src/itbench-aa --group parity python \
 ### 4. Grading
 
 Stage the Harbor-side answers for the two judge cells first: copy each full-run trial's
-`<trial>/artifacts/workspace/answer.json` (collected via `--artifact`) to
+`<trial>/artifacts/workspace/answer.json` (collected via the task's `artifacts` declaration) to
 `results/answers/<task-id>__run<k>__harbor.json`. Number the three Harbor jobs k=1..3 (chronological is simplest);
 one k per job directory, applied to all its trials. The pairing of k with the original side's `run_index` carries
 no meaning -- runs are independent repeats; each k just has to identify one complete 40-task run. Then cross-grade

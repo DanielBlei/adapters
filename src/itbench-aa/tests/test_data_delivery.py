@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Unit tests for data_delivery.py -- answer-key isolation guard.
 
 Covers the hard reject for ground_truth.yaml smuggled into an agent-visible
@@ -23,10 +22,10 @@ SRC_DIR = ADAPTER_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from itbench_aa._common import INPUT_SUBPATHS  # noqa: E402
-from itbench_aa import data_delivery  # noqa: E402
-from itbench_aa.data_delivery import stage_input_data  # noqa: E402
-from itbench_aa.scenarios import ScenarioItem  # noqa: E402
+from itbench_aa import data_delivery
+from itbench_aa._common import INPUT_SUBPATHS
+from itbench_aa.data_delivery import stage_input_data
+from itbench_aa.scenarios import ScenarioItem
 
 
 def _make_item(root: Path) -> ScenarioItem:
@@ -267,6 +266,21 @@ def test_partial_answer_key_excerpt_rejected():
         _stage_and_expect_reject(item, root, "answer-key schema marker")
 
 
+def test_loose_alerts_file_smuggle_rejected():
+    """The one upstream layout that stages a SINGLE FILE (a loose
+    alerts_*.json instead of the alerts/ dir) goes through the file branch
+    of the copier -- the fused scan must cover it exactly like the
+    directory branch."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        item = _make_item(root)
+        item.ground_truth = _GT
+        shutil.rmtree(item.scenario_dir / "alerts")
+        excerpt = '{"groups": [{"name": "flagd-config", "root_cause": true}]}'
+        (item.scenario_dir / "alerts_2026.json").write_text(excerpt)
+        _stage_and_expect_reject(item, root, "answer-key schema marker")
+
+
 def test_benign_inputs_mentioning_root_name_pass():
     """Telemetry naming the root entity WITHOUT an answer-key schema marker
     is normal and must stage fine."""
@@ -392,6 +406,7 @@ _TESTS = [
     test_renamed_ground_truth_copy_rejected,
     test_reserialized_answer_key_copy_rejected,
     test_partial_answer_key_excerpt_rejected,
+    test_loose_alerts_file_smuggle_rejected,
     test_benign_inputs_mentioning_root_name_pass,
     test_legitimate_inputs_stage_and_never_leak_gt,
     test_oversized_smuggled_answer_key_rejected,
